@@ -1,4 +1,4 @@
----
+﻿---
 name: novel-balancing
 description: สกิลกลางสำหรับเกลี่ยความยาวตอนนิยายให้สม่ำเสมอ (default 3,000–4,000 อักขระ ไม่รวมเว้นวรรค) — ใช้งานได้กับนิยายเรื่องใดก็ได้ที่มีโฟลเดอร์ตอน (03-episodes) ไม่ผูกกับเรื่องใดเรื่องนึง ใช้วิธีเกลาขอบเขต (Boundary Smoothing) + เคารพ Episode Bucket (ห้ามย้ายเหตุการณ์สำคัญข้ามตอน) + แนะนำ "เติม/ตัด" แทนการสลับย่อหน้าข้ามตอน ทำงานก่อนคอมไพล์ คู่กับ novel-structure / novel-episode / novel-recheck รองรับความยาวแบ่งตามประเภทตอน (เปิดเรื่อง/ไฮไลท์/จบอาร์ค/คั่นพิเศษ ตาม episode-template)
 ---
@@ -142,53 +142,64 @@ for fn, t, n, s in problems:
     print(f"  {fn} | ประเภท={t} | {n:,} อักขระ | {s}")
 ```
 
-### 4.2 redistribute ย่อหน้าอิสระ (redistribute.py — ใช้เฉพาะเมื่อไม่มีเหตุการณ์ล็อก)
+### 4.2 (ยกเลิก redistribute แบบอัตโนมัติ)
+> การย้ายย่อหน้าข้ามตอนด้วยสคริปต์มีความเสี่ยงทำลาย Episode Bucket locks
+> — สกิลนี้เองก็ระบุว่า "เติม/ตัด ดีกว่าสลับข้ามตอน" (ข้อ 2)
+> ให้ใช้วิธี "เติม/ตัด" เป็นหลักเสมอ
+> หากจำเป็นต้อง redistribute → **ทำด้วยมือ ตรวจ locks ก่อนทุกครั้ง**
+
+### 4.3 คอมไพล์ตอนเป็น .docx (compile.py)
+> **ต้องติดตั้ง dependency ก่อนใช้งาน:** `pip install python-docx`
+
+สคริปต์อ่าน path จาก (1) argument แรก (2) env `COMPILE_BASE` (3) โฟลเดอร์ปัจจุบัน
 ```python
+"""compile.py — คอมไพล์ตอนนิยายเป็น .docx (ต้องติดตั้ง python-docx)"""
 import os, sys, glob, re
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-base = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BALANCE_BASE", os.getcwd())
+base = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("COMPILE_BASE", os.getcwd())
 episodes_dir = os.path.join(base, "03-episodes")
-out_dir = os.path.join(base, "scratch", "balanced")
-os.makedirs(out_dir, exist_ok=True)
+out_file = os.path.join(base, "compiled", "novel.docx")
+os.makedirs(os.path.dirname(out_file), exist_ok=True)
 
-print("WARNING: สคริปต์นี้สลับย่อหน้าข้ามตอน — ใช้เฉพาะเมื่อยืนยันว่าไม่มีเหตุการณ์สำคัญ (Episode Bucket) ถูกล็อกข้ามตอน")
-print("ถ้ามีเหตุการณ์ล็อก ให้ใช้วิธี 'เติม/ตัด' ตามสกิลแทน")
+doc = Document()
+style = doc.styles["Normal"]
+style.font.name = "TH Sarabun New"
+style.font.size = Pt(16)
 
 files = sorted(
     f for f in glob.glob(os.path.join(episodes_dir, "episode-*.md"))
     if re.match(r"^episode-\d+\.md$", os.path.basename(f))
 )
-all_paras = []
-for i, f in enumerate(files, 1):
+if not files:
+    print(f"ไม่พบตอนใน {episodes_dir}")
+    sys.exit(1)
+
+for f in files:
     text = open(f, encoding="utf-8").read()
-    story = text.split("---")[0]
-    for line in story.split("\n")[1:]:
-        if line.strip():
-            all_paras.append(line.strip())
+    # ตัด Canon Facts / Editor Notes ออก (หลัง --- แรก)
+    story = text.split("---")[0] if "---" in text else text
 
-def cc(t):
-    return len(t.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", ""))
-
-total = sum(cc(p) for p in all_paras)
-target = total / len(files)
-chapters, cur, cur_c = [], [], 0
-for p in all_paras:
-    pc = cc(p)
-    if len(chapters) < len(files) - 1:
-        if cur_c > 0 and abs((cur_c + pc) - target) > abs(cur_c - target):
-            chapters.append(cur); cur = [p]; cur_c = pc
+    lines = story.strip().split("\n")
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("# "):
+            doc.add_heading(line.lstrip("# "), level=1)
+        elif line.startswith("## "):
+            doc.add_heading(line.lstrip("## "), level=2)
         else:
-            cur.append(p); cur_c += pc
-    else:
-        cur.append(p); cur_c += pc
-if cur:
-    chapters.append(cur)
+            doc.add_paragraph(line)
 
-for idx, ch in enumerate(chapters, 1):
-    with open(os.path.join(out_dir, f"episode-{idx:02d}_raw.md"), "w", encoding="utf-8") as o:
-        o.write(f"# BALANCED EPISODE {idx:02d}\n\n" + "\n\n".join(ch) + "\n")
-print(f"เขียน {len(chapters)} ตอนไปที่ {out_dir}")
+    doc.add_page_break()
+
+doc.save(out_file)
+print(f"คอมไพล์ {len(files)} ตอน → {out_file}")
 ```
+
 
 ## 5. ตัวอย่างการเรียกใช้ (Invocation)
 - "เกลี่ยความยาวตอน 1–20 ให้เท่ากัน" → ข้อ 3.1 วัด → ข้อ 3.2 โหลด locks → ข้อ 3.3 วางแผน → ข้อ 4 เกลา → ข้อ 5 อัปเดต
